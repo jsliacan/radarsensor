@@ -2,60 +2,106 @@ import time
 from collections import deque
 from multiprocessing.connection import Connection
 
-import serial
-from serial.serialutil import EIGHTBITS, PARITY_NONE, STOPBITS_ONE
+# sensor specific
+import datetime, time
+import asyncio
+import logging
+
+from bleak import BleakScanner, BleakClient
+from bleak.backends.characteristic import BleakGATTCharacteristic
 
 from bicycleinit.BicycleSensor import BicycleSensor
 
+sensor = None
+
+def bin2dec(n):
+    """
+    Convert floating point binary (exponent=-2) to decimal float.
+    """
+    fractional_part = 0.0
+    if n & 1 > 0:
+        fractional_part += 0.25
+    if n & 2 > 0:
+        fractional_part += 0.5
+    return fractional_part + (n>>2)
+
+def notification_handler(characteristic: BleakGATTCharacteristic, data: bytearray):
+    """
+    Simple notification handler which processes the data received into a
+    CSV row and prints it into a file.
+    """
+    
+    dt = datetime.datetime.now()
+    dt_str = dt.strftime("%Y-%m-%d %H:%M:%S.%f")
+    dt_unix = dt.timestamp()
+    target_id_mask = 0b11111100 # mask that reveals first 6 bits; use '&' with value
+    target_ids = [0 for x in range(6)]
+    target_ranges = [0 for x in range(6)] # 6 targets, each 3 bytes (info, range, speed)
+    target_speeds = [0.0 for x in range(6)]
+    bin_target_speeds = ["" for x in range(6)]
+
+    # data is a bytearray
+    intdata = [x for x in data]
+    j = 0 # target index
+    for i, dat in enumerate(intdata[1:]): # ignore flags in pos 0
+        if i%3 == 0: # each target has 3 bytes
+            j = i//3
+            target_ids[j] = (dat & target_id_mask)
+        elif i%3 == 1:
+            target_ranges[j] = dat
+        else: 
+            target_speeds[j] = bin2dec(dat)
+            bin_target_speeds[j] = format(dat, '08b')
+
+    data_row = [target_ids, target_ranges, target_speeds, bin_target_speeds]
+    sensor.write_measurement(data_row)
+
+async def scan(device_address):
+    """
+    Scan for the correct Varia.
+    """
+    return await BleakScanner.find_device_by_address(device_address)
+
+
+async def connect(device, characteristic_uuid):
+    """
+    Connect to the correct Varia.
+    """
+    # pair with device if not already paired
+    async with BleakClient(device, pair=True) as client:
+        
+        await client.start_notify(characteristic_uuid, notification_handler)
+        # await asyncio.sleep(60.0)     # run for given time (in seconds)
+        await asyncio.Future()  # run indefinitely
+        # await client.stop_notify(RADAR_CHAR_UUID)  # use with asyncio.sleep()
+
+async def radar(device_address, characteristic_uuid):
+    """
+    Main radar function that coordinates communication with Varia radar.
+    """
+
+    varia = await scan(device_address) # find the BLEDevice we are looking for
+    if not varia:
+        logging.warning("Device not found")
+        return
+
+    await connect(varia, characteristic_uuid)
 
 def main(bicycleinit: Connection, name: str, args: dict):
-  sensor = BicycleSensor(bicycleinit, name, args)
+   
+    global sensor
+    sensor = BicycleSensor(bicycleinit, name, args)
+    sensor.write_header(['target_ids', 'target_ranges', 'target_speeds', 'bin_target_speeds'])
 
-  port = args.get('port', '/dev/ttyUSB0')
-  try:
-    ser = serial.Serial(port, baudrate=115200, parity=PARITY_NONE, bytesize=EIGHTBITS, stopbits=STOPBITS_ONE, timeout=1.0)
-  except serial.SerialException as e:
-    sensor.send_msg(f'Error opening serial port {port}: {e}')
-    return
+    radar_mac = args['address']
+    char_uuid = args['char_uuid']
+    
+    if not (radar_mac and char_uuid):
+        sensor.send_msg(f'Error reading radar MAC address or characteristics UUID from config.')
 
-  sensor.write_header(['distance [cm]', 'strength', 'temperature'])
-  try:
-    # Initialize the sensor
-    cmd = [0x5a, 0x05, 0x07, 0x00, 0x66]
-    for c in cmd:
-      ser.write(c)
+    asyncio.run(radar(radar_mac, char_uuid))
 
-    measurement_frequency = args.get('measurement_frequency', 1.0)
-    measurement_interval = 1.0 / measurement_frequency
-    last_measurement_time = time.time()
-
-    Q = deque([0x59] * 9)
-    while True:
-      b = ser.read()
-      Q.rotate(-1)
-      Q[0] = ord(b)
-
-      if Q[0] == 0x59 and Q[1] == 0x59:
-        # Parse the sensor data: distance, strength, temp
-        dist = (Q[3] * 256) + Q[2]
-        strength = (Q[5] * 256) + Q[4]
-        temp = (Q[7] * 256) + Q[6]
-        checksum = sum([Q[i] for i in range(8)]) % 256
-
-        if checksum == Q[8]:
-          current_time = time.time()
-          if current_time - last_measurement_time >= measurement_interval:
-            sensor.write_measurement([dist, strength, temp])
-            last_measurement_time = current_time
-  except KeyboardInterrupt:
-    pass
-  except serial.SerialException as e:
-    sensor.send_msg(f'Error reading from serial port: {e}')
-  except Exception as e:
-    sensor.send_msg(f'Error reading from serial port: {e}')
-  finally:
-    ser.close()
     sensor.shutdown()
 
 if __name__ == "__main__":
-  main(None, "bicyclelidar", {'port': '/dev/ttyUSB0', 'measurement_frequency': 1.0})
+    main(None, "radar", {'address': '', 'char_uuid': ''})
