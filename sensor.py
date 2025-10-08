@@ -54,6 +54,7 @@ def notification_handler(characteristic: BleakGATTCharacteristic, data: bytearra
             bin_target_speeds[j] = format(dat, '08b')
 
     data_row = [target_ids, target_ranges, target_speeds, bin_target_speeds]
+    print(f"{dt_str}\t{target_ranges}\t{target_speeds}")
     sensor.write_measurement(data_row)
 
 async def scan(device_address):
@@ -69,7 +70,7 @@ async def connect(device, characteristic_uuid):
     """
     # pair with device if not already paired
     async with BleakClient(device, pair=True) as client:
-        
+        print("Varia connected.")
         await client.start_notify(characteristic_uuid, notification_handler)
         # await asyncio.sleep(60.0)     # run for given time (in seconds)
         await asyncio.Future()  # run indefinitely
