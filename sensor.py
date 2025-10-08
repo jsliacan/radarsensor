@@ -6,6 +6,7 @@ from multiprocessing.connection import Connection
 import datetime, time
 import asyncio
 import logging
+import threading
 
 from bleak import BleakScanner, BleakClient
 from bleak.backends.characteristic import BleakGATTCharacteristic
@@ -13,6 +14,11 @@ from bleak.backends.characteristic import BleakGATTCharacteristic
 from bicycleinit.BicycleSensor import BicycleSensor
 
 sensor = None
+radar_mac = ''
+char_uuid = ''
+
+worker_thread = threading.Thread(target=worker_main)
+worker_thread.daemon = True    # don't worry about shutting it down
 
 def bin2dec(n):
     """
@@ -57,40 +63,52 @@ def notification_handler(characteristic: BleakGATTCharacteristic, data: bytearra
     print(f"{dt_str}\t{target_ranges}\t{target_speeds}")
     sensor.write_measurement(data_row)
 
-async def scan(device_address):
+async def scan():
     """
     Scan for the correct Varia.
     """
-    return await BleakScanner.find_device_by_address(device_address)
+    global radar_mac 
+
+    return await BleakScanner.find_device_by_address(radar_mac)
 
 
-async def connect(device, characteristic_uuid):
+async def connect(device):
     """
     Connect to the correct Varia.
     """
+    global char_uuid
     # pair with device if not already paired
     async with BleakClient(device, pair=True) as client:
         print("Varia connected.")
-        await client.start_notify(characteristic_uuid, notification_handler)
+        await client.start_notify(char_uuid, notification_handler)
         # await asyncio.sleep(60.0)     # run for given time (in seconds)
         await asyncio.Future()  # run indefinitely
         # await client.stop_notify(RADAR_CHAR_UUID)  # use with asyncio.sleep()
 
-async def radar(device_address, characteristic_uuid):
+async def radar():
     """
     Main radar function that coordinates communication with Varia radar.
     """
+    global char_uuid, radar_mac
 
-    varia = await scan(device_address) # find the BLEDevice we are looking for
+    varia = await scan(radar_mac) # find the BLEDevice we are looking for
     if not varia:
         logging.warning("Device not found")
         return
 
-    await connect(varia, characteristic_uuid)
+    await connect(varia, char_uuid)
+
+async def worker_main():
+    
+    global radar_mac, char_uuid
+
+    asyncio.run(radar())
+
 
 def main(bicycleinit: Connection, name: str, args: dict):
    
-    global sensor
+    global sensor, char_uuid, radar_mac, worker_thread
+
     sensor = BicycleSensor(bicycleinit, name, args)
     sensor.write_header(['target_ids', 'target_ranges', 'target_speeds', 'bin_target_speeds'])
 
@@ -100,7 +118,7 @@ def main(bicycleinit: Connection, name: str, args: dict):
     if not (radar_mac and char_uuid):
         sensor.send_msg(f'Error reading radar MAC address or characteristics UUID from config.')
 
-    asyncio.run(radar(radar_mac, char_uuid))
+    worker_thread.start()
 
     sensor.shutdown()
 
