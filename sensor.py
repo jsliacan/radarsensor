@@ -17,9 +17,6 @@ sensor = None
 radar_mac = ''
 char_uuid = ''
 
-worker_thread = threading.Thread(target=worker_main)
-worker_thread.daemon = True    # don't worry about shutting it down
-
 def bin2dec(n):
     """
     Convert floating point binary (exponent=-2) to decimal float.
@@ -67,7 +64,6 @@ async def scan():
     """
     Scan for the correct Varia.
     """
-    global radar_mac 
 
     return await BleakScanner.find_device_by_address(radar_mac)
 
@@ -76,7 +72,6 @@ async def connect(device):
     """
     Connect to the correct Varia.
     """
-    global char_uuid
     # pair with device if not already paired
     async with BleakClient(device, pair=True) as client:
         print("Varia connected.")
@@ -89,21 +84,13 @@ async def radar():
     """
     Main radar function that coordinates communication with Varia radar.
     """
-    global char_uuid, radar_mac
 
-    varia = await scan(radar_mac) # find the BLEDevice we are looking for
+    varia = await scan() # find the BLEDevice we are looking for
     if not varia:
         logging.warning("Device not found")
         return
 
-    await connect(varia, char_uuid)
-
-async def worker_main():
-    
-    global radar_mac, char_uuid
-
-    asyncio.run(radar())
-
+    await connect(varia)
 
 def main(bicycleinit: Connection, name: str, args: dict):
    
@@ -118,9 +105,10 @@ def main(bicycleinit: Connection, name: str, args: dict):
     if not (radar_mac and char_uuid):
         sensor.send_msg(f'Error reading radar MAC address or characteristics UUID from config.')
 
-    worker_thread.start()
-
+    asyncio.run(radar())
     sensor.shutdown()
 
 if __name__ == "__main__":
     main(None, "radar", {'address': '', 'char_uuid': ''})
+
+
